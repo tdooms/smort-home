@@ -1,0 +1,17 @@
+{
+    "callbacks":
+    [
+        {
+            "type": "on_message",
+            "from_name": "Silke",
+            "contains": "#ikwilaandacht",
+            "function": "toggle"
+        },
+        {
+            "type": "on_message",
+            "from_name": "Silke",
+            "regex": "#pink",
+            "function": "setcolor pink"
+        }
+    ]
+}
