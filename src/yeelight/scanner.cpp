@@ -20,21 +20,22 @@ namespace yeelight
 {
 
 
-scanner::scanner()
-: context(std::make_shared<boost::asio::io_context>()), listen_socket(*context),
-scan_socket(*context), timer(*context), message(), buffer(buffer_size, '\0'), message_count(0)
+scanner::scanner(std::shared_ptr<boost::asio::io_context> context)
+                : context(std::move(context)), listen_socket(*this->context),
+                scan_socket(*this->context), timer(*this->context),
+                message(), buffer(buffer_size, '\0'), message_count(0)
 {
     const auto listen_address = boost::asio::ip::address();
     const auto multicast_address = boost::asio::ip::address::from_string(multicast_ip);
 
     boost::asio::ip::udp::endpoint listen_endpoint(listen_address, multicast_port);
-    endpoint = boost::asio::ip::udp::endpoint(multicast_address, multicast_port);
+    multicast_endpoint = boost::asio::ip::udp::endpoint(multicast_address, multicast_port);
 
     listen_socket.open(listen_endpoint.protocol());
     listen_socket.bind(listen_endpoint);
     listen_socket.set_option(boost::asio::ip::multicast::join_group(multicast_address));
 
-    scan_socket.open(endpoint.protocol());
+    scan_socket.open(multicast_endpoint.protocol());
 
     message += "M-SEARCH * HTTP/1.1\r\n";
     message += "HOST: 239.255.255.250:1982\r\n";
@@ -45,7 +46,7 @@ scan_socket(*context), timer(*context), message(), buffer(buffer_size, '\0'), me
     async_receive();
     async_listen();
 
-    thread = std::thread([&](){ context->run(); });
+    thread = std::thread([&](){ this->context->run(); });
 }
 
 scanner::~scanner()
@@ -54,19 +55,14 @@ scanner::~scanner()
     thread.join();
 }
 
-std::shared_ptr<device> scanner::get_device(uint64_t id)
+std::map<uint64_t, device> scanner::get_devices() const
 {
-    const auto iter = devices.find(id);
-    if(iter == devices.end()) return nullptr;
-    else return iter->second;
+    return devices;
 }
 
-std::shared_ptr<device> scanner::get_device(const std::string& name)
+std::shared_ptr<boost::asio::io_context> scanner::get_io_context() const
 {
-    const auto comp = [&](const auto& device){ return device.second->get_name() == name; };
-    const auto iter = std::find_if(devices.begin(), devices.end(), comp);
-    if(iter == devices.end()) return nullptr;
-    else return iter->second;
+    return context;
 }
 
 void scanner::async_receive()
@@ -81,7 +77,7 @@ void scanner::async_receive()
 void scanner::async_broadcast()
 {
     scan_socket.async_send_to(
-            boost::asio::buffer(message), endpoint,
+            boost::asio::buffer(message), multicast_endpoint,
             boost::bind(&scanner::handle_send_to, this,
                     boost::asio::placeholders::error));
 }
@@ -128,15 +124,50 @@ void scanner::handle_timeout(const boost::system::error_code& error)
 
 void scanner::handle_response(std::string_view response)
 {
-    const auto id = device::get_id_from_string(response);
-    if(not id.has_value()) return;
+    const static std::string http_ok = "HTTP/1.1 200 OK\r\n";
+    const static std::string notify = "NOTIFY * HTTP/1.1\r\n";
 
-    if(devices.find(*id) != devices.end()) return;
+    auto response_iter = response.begin();
+    if(std::equal(http_ok.begin(), http_ok.end(), response.begin()))
+    {
+        response_iter += http_ok.size();
+    }
+    else if(std::equal(notify.begin(), notify.end(), response.begin()))
+    {
+        response_iter += notify.size();
+    }
+    else return;
 
-    auto device = device::parse_from_string(response, context);
-    if(device == nullptr) return;
+    std::map<std::string, std::string> data;
 
-    devices.emplace(*id, std::move(device));
+    while(true)
+    {
+        const auto key_end = std::find(response_iter, response.end(), ':');
+        const auto value_start = key_end + 2;
+        if(value_start >= response.end()) return;
+
+        const auto value_end = std::find(value_start, response.end(), '\r');
+        data.emplace(std::string(response_iter, key_end), std::string(value_start, value_end));
+
+        if(value_end + 2 >= response.end()) break;
+        response_iter = value_end + 2;
+    }
+
+    const auto index = data["Location"].find_first_of(':', 11);
+    if(index == std::string::npos) return;
+
+    const auto ip_address = data["Location"].substr(11, index - 11);
+    const auto port = std::stoul(data["Location"].substr(index + 1));
+    const auto id = std::stoul(data["id"], nullptr, 16);
+    const auto name = data["name"];
+
+    const auto iter = devices.find(id);
+    if(iter != devices.end()) return;
+
+    boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::make_address(ip_address), port);
+
+    yeelight::device device(context, endpoint, id, name);
+    devices.try_emplace(id, device).second;
 }
 
 

@@ -13,19 +13,19 @@
 namespace telegram
 {
 
-service::service()
+manager::manager()
 {
     td::Client::execute({0, td_api::make_object<td_api::setLogVerbosityLevel>(1)});
     client = std::make_unique<td::Client>();
 }
 
-service::~service()
+manager::~manager()
 {
     should_run = false;
     thread.join();
 }
 
-void service::run()
+void manager::run()
 {
     const auto func = [&]()
     {
@@ -53,7 +53,7 @@ void service::run()
 }
 
 
-void service::send_query(td_api::object_ptr<td_api::Function> function, std::function<void(td_api::object_ptr<td_api::Object>)> handler)
+void manager::send_query(td_api::object_ptr<td_api::Function> function, std::function<void(td_api::object_ptr<td_api::Object>)> handler)
 {
     if(handler != nullptr)
     {
@@ -64,7 +64,7 @@ void service::send_query(td_api::object_ptr<td_api::Function> function, std::fun
     current_query_id++;
 }
 
-bool service::handle_response(td::Client::Response response)
+bool manager::handle_response(td::Client::Response response)
 {
     if (response.object == nullptr) return false;
 
@@ -80,7 +80,7 @@ bool service::handle_response(td::Client::Response response)
     return true;
 }
 
-void service::handle_update(td_api::object_ptr<td_api::Object> update)
+void manager::handle_update(td_api::object_ptr<td_api::Object> update)
 {
     td_api::downcast_call(
             *update, overloaded(
@@ -124,7 +124,7 @@ void service::handle_update(td_api::object_ptr<td_api::Object> update)
             ));
 }
 
-void service::handle_authorization_update(td_api::object_ptr<td_api::AuthorizationState> authorization_state)
+void manager::handle_authorization_update(td_api::object_ptr<td_api::AuthorizationState> authorization_state)
 {
     td_api::downcast_call(
             *authorization_state,

@@ -27,7 +27,6 @@ namespace yeelight
         turn_off = 2
     };
 
-
     struct flow_state
     {
         std::chrono::milliseconds duration;

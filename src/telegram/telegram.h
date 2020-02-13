@@ -54,11 +54,11 @@ using namespace std::chrono_literals;
 namespace telegram
 {
 
-class service
+class manager
 {
 public:
-    explicit service();
-    ~service();
+    explicit manager();
+    ~manager();
 
     void run();
 

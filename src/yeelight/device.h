@@ -14,6 +14,7 @@
 #include <vector>
 #include <chrono>
 #include <map>
+#include <regex>
 #include <memory>
 #include <variant>
 
@@ -28,65 +29,54 @@ namespace yeelight
 class device
 {
 public:
-    device(std::shared_ptr<boost::asio::io_context> context, const std::string& ip_address, size_t port,
-            std::string model, std::string firmware_version, std::vector<std::string> support,
-            bool is_on, size_t brightness, device_color color, std::string name, size_t id);
+    device(std::shared_ptr<boost::asio::io_context> context,
+            boost::asio::ip::tcp::endpoint endpoint,
+            size_t id, std::string name);
 
-    device(const device&) = delete;
-    device& operator=(const device&) = delete;
+    device(const device& device);
 
-    [[nodiscard]] uint64_t get_id();
+    uint64_t get_id() const;
 
-    [[nodiscard]] const std::string& get_name();
+    std::string get_name() const;
 
-     bool toggle();
+    std::string get_ip_address() const;
 
-     bool set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration = default_duration);
+    uint64_t get_port() const;
 
-     bool set_rgb_color(dot::color new_color, std::chrono::milliseconds duration = default_duration);
+    bool toggle() const;
 
-     bool set_brightness(size_t new_brightness, std::chrono::milliseconds duration = default_duration);
+    bool set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration = default_duration) const;
 
-     bool set_power(bool on, std::chrono::milliseconds duration = default_duration);
+    bool set_rgb_color(dot::color new_color, std::chrono::milliseconds duration = default_duration) const;
 
-     bool start_color_flow(flow_stop_action action, const std::vector<flow_state>& states);
+    bool set_brightness(size_t new_brightness, std::chrono::milliseconds duration = default_duration) const;
 
-     bool stop_color_flow();
+    bool set_power(bool on, std::chrono::milliseconds duration = default_duration) const;
 
-     bool set_shutdown_timer(std::chrono::minutes time);
+    bool start_color_flow(flow_stop_action action, const std::vector<flow_state>& states) const;
 
-     bool remove_shutdown_timer();
+    bool stop_color_flow() const;
 
-     bool set_name(std::string new_name);
+    bool set_shutdown_timer(std::chrono::minutes time) const;
 
-     bool pulse_color(dot::color new_color, std::chrono::milliseconds duration = default_duration);
+    bool remove_shutdown_timer() const;
 
-     bool toggle_twice(std::chrono::milliseconds duration = default_duration);
+    bool toggle_twice(std::chrono::milliseconds duration = default_duration) const;
 
-    static std::shared_ptr<device> parse_from_string(std::string_view string, std::shared_ptr<boost::asio::io_context> context);
-    static std::optional<uint64_t> get_id_from_string(std::string_view string);
+    bool set_name(std::string new_name);
+
 
 private:
     template<typename... Args>
-    bool send_operation(std::string method, Args... args);
+    bool send_operation(std::string method, Args... args) const;
 
-    void handle_send(const boost::system::error_code& error, size_t bytes_transferred);
+    static void handle_send(const boost::system::error_code& error, size_t bytes_transferred);
 
-    std::string smooth_or_sudden(std::chrono::milliseconds duration);
-
-    bool return_to_old_state();
+    static std::string smooth_or_sudden(std::chrono::milliseconds duration);
 
     std::shared_ptr<boost::asio::io_context> context;
     boost::asio::ip::tcp::endpoint endpoint;
-    boost::asio::ip::tcp::socket send_socket;
-
-    std::string model;
-    std::string firmware_version;
-    std::vector<std::string> support;
-
-    bool is_on;
-    size_t brightness;
-    device_color color;
+    mutable boost::asio::ip::tcp::socket send_socket;
 
     std::string name;
     size_t id;

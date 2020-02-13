@@ -2,9 +2,9 @@
 // @name        : nettest.h
 // @author      : Thomas Dooms
 // @date        : 1/30/20
-// @version     : 
+// @version     :
 // @copyright   : BA1 Informatica - Thomas Dooms - University of Antwerp
-// @description : 
+// @description :
 //============================================================================
 
 
@@ -12,7 +12,6 @@
 
 #include <chrono>
 #include <iostream>
-#include <mutex>
 #include <string>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 
@@ -21,18 +20,17 @@
 namespace yeelight
 {
 
-
 using namespace std::chrono_literals;
-
 
 class scanner
 {
 public:
-    explicit scanner();
+    explicit scanner(std::shared_ptr<boost::asio::io_context> context = std::make_shared<boost::asio::io_context>());
     ~scanner();
 
-    std::shared_ptr<device> get_device(uint64_t id);
-    std::shared_ptr<device> get_device(const std::string& name);
+
+    [[nodiscard]] std::map<uint64_t, yeelight::device> get_devices() const;
+    [[nodiscard]] std::shared_ptr<boost::asio::io_context> get_io_context() const;
 
 private:
     void async_receive();
@@ -58,7 +56,7 @@ private:
     boost::asio::ip::udp::socket scan_socket;
 
     boost::asio::ip::udp::endpoint sender_endpoint;
-    boost::asio::ip::udp::endpoint endpoint;
+    boost::asio::ip::udp::endpoint multicast_endpoint;
 
     boost::asio::deadline_timer timer;
 
@@ -66,11 +64,9 @@ private:
     std::string buffer;
     size_t message_count;
 
-    std::map<uint64_t, std::shared_ptr<device>> devices;
-    std::map<std::string, uint64_t> names;
+    std::map<uint64_t, device> devices;
 
     std::thread thread;
-    std::mutex mutex;
 
     constexpr static auto buffer_size = 1024;
     constexpr static auto max_message_count = 10;
