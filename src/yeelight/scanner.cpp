@@ -2,17 +2,17 @@
 // @name        : deviceManager.cpp
 // @author      : Thomas Dooms
 // @date        : 1/30/20
-// @version     : 
+// @version     :
 // @copyright   : BA1 Informatica - Thomas Dooms - University of Antwerp
-// @description : 
+// @description :
 //============================================================================
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/bind.hpp>
 
-#include <nlohmann/json.h>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.h>
 
 #include "scanner.h"
 
@@ -20,12 +20,11 @@ namespace yeelight
 {
 
 
-scanner::scanner(std::shared_ptr<boost::asio::io_context> context)
-                : context(std::move(context)), listen_socket(*this->context),
-                scan_socket(*this->context), timer(*this->context),
-                message(), buffer(buffer_size, '\0'), message_count(0)
+Scanner::Scanner(std::function<void(std::unique_ptr<Device>)> handler)
+: context(std::make_shared<boost::asio::io_context>()), work(*context), listen_socket(*context),
+  scan_socket(*context), timer(*context), message(), buffer(buffer_size, '\0'), devices(), handler(std::move(handler))
 {
-    const auto listen_address = boost::asio::ip::address();
+    const auto listen_address    = boost::asio::ip::address();
     const auto multicast_address = boost::asio::ip::address::from_string(multicast_ip);
 
     boost::asio::ip::udp::endpoint listen_endpoint(listen_address, multicast_port);
@@ -46,86 +45,59 @@ scanner::scanner(std::shared_ptr<boost::asio::io_context> context)
     async_receive();
     async_listen();
 
-    thread = std::thread([&](){ this->context->run(); });
+    read_from_file();
+    thread = std::thread([&]() { context->run(); });
 }
 
-scanner::~scanner()
+Scanner::~Scanner()
 {
     context->stop();
+    write_to_file(); // while we wait for the context to stop we cna write back to the file
     thread.join();
 }
 
-std::map<uint64_t, device> scanner::get_devices() const
+void Scanner::async_receive()
 {
-    return devices;
+    const auto handler = [&](const auto& error, auto bytes) {
+        if(error) return;
+
+        handle_response(std::string_view(buffer.data(), bytes));
+        async_receive();
+    };
+
+    scan_socket.async_receive(boost::asio::buffer(buffer, buffer_size), handler);
 }
 
-std::shared_ptr<boost::asio::io_context> scanner::get_io_context() const
+void Scanner::async_broadcast()
 {
-    return context;
-}
+    const auto handler = [&](const auto& error, [[maybe_unused]] auto bytes) {
+        if(error) return;
 
-void scanner::async_receive()
-{
-    scan_socket.async_receive(
-            boost::asio::buffer(buffer, buffer_size),
-            boost::bind(&scanner::handle_receive, this,
-                    boost::asio::placeholders::error,
-                    boost::asio::placeholders::bytes_transferred));
-}
-
-void scanner::async_broadcast()
-{
-    scan_socket.async_send_to(
-            boost::asio::buffer(message), multicast_endpoint,
-            boost::bind(&scanner::handle_send_to, this,
-                    boost::asio::placeholders::error));
-}
-
-void scanner::async_listen()
-{
-    listen_socket.async_receive_from(
-            boost::asio::buffer(buffer, buffer_size), sender_endpoint,
-            boost::bind(&scanner::handle_receive_from, this,
-                    boost::asio::placeholders::error,
-                    boost::asio::placeholders::bytes_transferred));
-}
-
-void scanner::handle_receive(const boost::system::error_code& error, const size_t bytes_received)
-{
-    if (error) return;
-    handle_response(std::string_view(buffer.data(), bytes_received));
-    async_receive();
-}
-
-void scanner::handle_receive_from(const boost::system::error_code& error, const size_t bytes_received)
-{
-    if (error) return;
-    handle_response(std::string_view(buffer.data(), bytes_received));
-    async_listen();
-}
-
-void scanner::handle_send_to(const boost::system::error_code& error)
-{
-    if (not error and message_count < max_message_count)
-    {
         timer.expires_from_now(boost::posix_time::seconds(1));
-        timer.async_wait(
-                boost::bind(&scanner::handle_timeout, this,
-                            boost::asio::placeholders::error));
-    }
+        timer.async_wait([&](auto& error) {
+            if(error) return;
+            async_broadcast();
+        });
+    };
+
+    scan_socket.async_send_to(boost::asio::buffer(message), multicast_endpoint, handler);
 }
 
-void scanner::handle_timeout(const boost::system::error_code& error)
+void Scanner::async_listen()
 {
-    if (error) return;
-    async_broadcast();
+    const auto handler = [&](const auto& error, auto bytes) {
+        if(error) return;
+        handle_response(std::string_view(buffer.data(), bytes));
+        async_listen();
+    };
+
+    listen_socket.async_receive_from(boost::asio::buffer(buffer, buffer_size), sender_endpoint, handler);
 }
 
-void scanner::handle_response(std::string_view response)
+void Scanner::handle_response(std::string_view response)
 {
     const static std::string http_ok = "HTTP/1.1 200 OK\r\n";
-    const static std::string notify = "NOTIFY * HTTP/1.1\r\n";
+    const static std::string notify  = "NOTIFY * HTTP/1.1\r\n";
 
     auto response_iter = response.begin();
     if(std::equal(http_ok.begin(), http_ok.end(), response.begin()))
@@ -136,13 +108,14 @@ void scanner::handle_response(std::string_view response)
     {
         response_iter += notify.size();
     }
-    else return;
+    else
+        return;
 
     std::map<std::string, std::string> data;
 
     while(true)
     {
-        const auto key_end = std::find(response_iter, response.end(), ':');
+        const auto key_end     = std::find(response_iter, response.end(), ':');
         const auto value_start = key_end + 2;
         if(value_start >= response.end()) return;
 
@@ -156,19 +129,48 @@ void scanner::handle_response(std::string_view response)
     const auto index = data["Location"].find_first_of(':', 11);
     if(index == std::string::npos) return;
 
-    const auto ip_address = data["Location"].substr(11, index - 11);
-    const auto port = std::stoul(data["Location"].substr(index + 1));
-    const auto id = std::stoul(data["id"], nullptr, 16);
-    const auto name = data["name"];
+    const auto id   = std::stoul(data["id"], nullptr, 16);
+    const auto ip   = data["Location"].substr(11, index - 11);
 
-    const auto iter = devices.find(id);
-    if(iter != devices.end()) return;
+    handle_new_device(id, ip);
+}
 
-    boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::make_address(ip_address), port);
+void Scanner::read_from_file()
+{
+    std::ifstream file(path);
+    const auto json = nlohmann::json::parse(file);
 
-    yeelight::device device(context, endpoint, id, name);
-    devices.try_emplace(id, device).second;
+    for(const auto& elem : json)
+    {
+        handle_new_device(elem["id"], elem["ip"]);
+    }
+}
+
+void Scanner::write_to_file()
+{
+    std::ofstream file(path);
+    auto json = nlohmann::json();
+
+    size_t index = 0;
+    for(const auto& elem : devices)
+    {
+        json[index]["id"] = elem.first;
+        json[index]["ip"] = elem.second;
+        index++;
+    }
+    file << json << std::flush;
+}
+
+void Scanner::handle_new_device(uint64_t id, std::string ip)
+{
+    const auto [iter, emplaced] = devices.try_emplace(id, ip);
+    if (not emplaced) return;
+
+    const auto address = boost::asio::ip::make_address(ip);
+    const auto endpoint = boost::asio::ip::tcp::endpoint(address, tcp_port);
+
+    handler(std::make_unique<Device>(context, endpoint));
 }
 
 
-}
+} // namespace yeelight

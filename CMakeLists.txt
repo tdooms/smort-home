@@ -1,34 +1,26 @@
 cmake_minimum_required(VERSION 3.10)
-project(smort-home)
+project(SHP)
 
 set(CMAKE_CXX_STANDARD 17)
 
-file(GLOB_RECURSE HDRS ${smort-home_SOURCE_DIR}/src/*.h  )
-file(GLOB_RECURSE SRCS ${smort-home_SOURCE_DIR}/src/*.cpp)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
 
-add_executable(smort-home ${HDRS} ${SRCS})
+find_package(Qt5Core    REQUIRED)
+find_package(Qt5Widgets REQUIRED)
+find_package(Qt5Gui     REQUIRED)
 
-target_include_directories(smort-home PRIVATE ${smort-home_SOURCE_DIR}/external)
-target_include_directories(smort-home PRIVATE ${smort-home_SOURCE_DIR}/../dot/src)
+file(GLOB_RECURSE HDRS ${PROJECT_SOURCE_DIR}/src/*.h  )
+file(GLOB_RECURSE SRCS ${PROJECT_SOURCE_DIR}/src/*.cpp)
+
+add_executable(SHP ${HDRS} ${SRCS})
+
+target_include_directories(SHP PRIVATE ${PROJECT_SOURCE_DIR}/external)
+target_include_directories(SHP PRIVATE ${PROJECT_SOURCE_DIR}/../dot/src)
 
 find_package(Td 1.6.0 REQUIRED)
-target_link_libraries(smort-home PRIVATE Td::TdStatic)
+target_link_libraries(SHP PRIVATE Td::TdStatic Qt5::Widgets Qt5::Widgets Qt5::Gui)
 
-set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wnon-virtual-dtor -Wold-style-cast -Wunused -Woverloaded-virtual -Wpedantic -Wnull-dereference -Wdouble-promotion -Wformat=2")
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wnon-virtual-dtor -Wold-style-cast -Wunused -Woverloaded-virtual -Wpedantic -Wnull-dereference -Wdouble-promotion")
 
-
-# -Wall
-# -Werror # treat all warnings as errors
-#- Wextra # reasonable and standard
-# -Wshadow # warn the user if a variable declaration shadows one from a parent context
-# -Wnon-virtual-dtor # warn the user if a class with virtual functions has a non-virtual destructor
-# -Wold-style-cast # warn for c-style casts
-# -Wcast-align # warn for potential performance problem casts
-# -Wunused # warn on anything being unused
-# -Woverloaded-virtual # warn if you overload (not override) a virtual function
-# -Wpedantic # warn if non-standard C++ is used
-# -Wconversion # warn on type conversions that may lose data
-# -Wsign-conversion # warn on sign conversions
-# -Wnull-dereference # warn if a null dereference is detected
-# -Wdouble-promotion # warn if float is implicit promoted to double
-# -Wformat=2 # warn on security issues around functions that format output (ie printf)

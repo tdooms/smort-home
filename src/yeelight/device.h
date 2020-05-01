@@ -2,87 +2,128 @@
 // @name        : lamp.h
 // @author      : Thomas Dooms
 // @date        : 1/17/20
-// @version     : 
+// @version     :
 // @copyright   : BA1 Informatica - Thomas Dooms - University of Antwerp
-// @description : 
+// @description :
 //============================================================================
-
 
 #pragma once
 
-#include <string>
-#include <vector>
 #include <chrono>
 #include <map>
-#include <regex>
 #include <memory>
+#include <regex>
+#include <string>
 #include <variant>
+#include <vector>
 
-#include <utility/color.h>
 #include <boost/asio.hpp>
+#include <queue>
+#include <set>
+#include <utility/color.h>
 
 #include "util.h"
+
 
 namespace yeelight
 {
 
-class device
+enum State
 {
-public:
-    device(std::shared_ptr<boost::asio::io_context> context,
-            boost::asio::ip::tcp::endpoint endpoint,
-            size_t id, std::string name);
+    stateless,
+    connected,
+    disconnected,
+};
 
-    device(const device& device);
+class Device
+{
+    public:
+    Device(const std::shared_ptr<boost::asio::io_context>& context, boost::asio::ip::tcp::endpoint endpoint);
 
-    uint64_t get_id() const;
+    Device(const Device&) = delete;
 
-    std::string get_name() const;
+    Device operator=(const Device&) = delete;
 
-    std::string get_ip_address() const;
+    ////////////////////////////////////////////////////
 
-    uint64_t get_port() const;
+    void when_connected(std::function<void()> operation, bool remove = false);
 
-    bool toggle() const;
+    void when_disconnected(std::function<void()> operation, bool remove = false);
 
-    bool set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration = default_duration) const;
+    void when_updated(std::function<void()> operation, bool remove = false);
 
-    bool set_rgb_color(dot::color new_color, std::chrono::milliseconds duration = default_duration) const;
+    ////////////////////////////////////////////////////
 
-    bool set_brightness(size_t new_brightness, std::chrono::milliseconds duration = default_duration) const;
+    std::pair<bool, bool> get_powered();
 
-    bool set_power(bool on, std::chrono::milliseconds duration = default_duration) const;
+    std::pair<int32_t, bool> get_brightness();
 
-    bool start_color_flow(flow_stop_action action, const std::vector<flow_state>& states) const;
+    std::pair<std::string, bool> get_name();
 
-    bool stop_color_flow() const;
+    ////////////////////////////////////////////////////
 
-    bool set_shutdown_timer(std::chrono::minutes time) const;
+    void toggle();
 
-    bool remove_shutdown_timer() const;
+    void set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration = default_duration);
 
-    bool toggle_twice(std::chrono::milliseconds duration = default_duration) const;
+    void set_rgb_color(dot::color new_color, std::chrono::milliseconds duration = default_duration);
 
-    bool set_name(std::string new_name);
+    void set_brightness(size_t new_brightness, std::chrono::milliseconds duration = default_duration);
+
+    void set_powered(bool on, std::chrono::milliseconds duration = default_duration);
+
+    void start_color_flow(flow_stop_action action, const std::vector<flow_state>& states);
+
+    void stop_color_flow();
+
+    void set_shutdown_timer(std::chrono::minutes time);
+
+    void remove_shutdown_timer();
+
+    void set_name(std::string new_name);
+
+    private:
+
+    using CallbackList = std::vector<std::pair<std::function<void()>, bool>>;
 
 
-private:
-    template<typename... Args>
-    bool send_operation(std::string method, Args... args) const;
+    template <typename... Args>
+    uint64_t send_operation(std::string method, Args... args);
 
-    static void handle_send(const boost::system::error_code& error, size_t bytes_transferred);
+    void update_params();
 
-    static std::string smooth_or_sudden(std::chrono::milliseconds duration);
+    void start_listening();
 
-    std::shared_ptr<boost::asio::io_context> context;
-    boost::asio::ip::tcp::endpoint endpoint;
-    mutable boost::asio::ip::tcp::socket send_socket;
+    void try_connecting();
 
-    std::string name;
-    size_t id;
+    void connect_handler();
 
+    void disconnect_handler();
+
+    void execute_callbacks(CallbackList& callbacks);
+
+    // io stuff
+    std::shared_ptr<boost::asio::io_context>        context;
+    boost::asio::ip::tcp::endpoint                  endpoint;
+    boost::asio::ip::tcp::socket                    send_socket;
+    std::string                                     buffer;
+    State                                           state;
+    uint64_t                                        message_id;
+    std::set<uint64_t>                              param_request;
+    std::map<uint64_t, boost::asio::deadline_timer> timeouts;
+
+    // contained data, bool indicates if it has been updates since query
+    std::pair<bool, bool>        powered;
+    std::pair<int32_t, bool>     brightness;
+    std::pair<std::string, bool> name;
+
+    // handler functions
+    CallbackList on_connection;
+    CallbackList on_disconnection;
+    CallbackList on_update;
+
+    // static variables
     constexpr static auto default_duration = std::chrono::milliseconds(300);
 };
 
-}
-
+} // namespace yeelight

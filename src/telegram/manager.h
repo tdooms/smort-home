@@ -2,45 +2,45 @@
 // @name        : telegram.h
 // @author      : Thomas Dooms
 // @date        : 1/18/20
-// @version     : 
+// @version     :
 // @copyright   : BA1 Informatica - Thomas Dooms - University of Antwerp
-// @description : 
+// @description :
 //============================================================================
 
 
 #pragma once
 
-#include <td/telegram/td_api.h>
-#include <td/telegram/Client.h>
 #include <signals/connect.h>
+#include <td/telegram/Client.h>
+#include <td/telegram/td_api.h>
 
-#include <map>
+#include <chrono>
 #include <functional>
 #include <iostream>
-#include <chrono>
+#include <map>
 #include <thread>
 
 // stolen from github something something
 namespace detail
 {
-    template <class... Fs>
-    struct overload;
+template <class... Fs>
+struct overload;
 
-    template <class F>
-    struct overload<F> : public F
-    {
-        explicit overload(F f) : F(f) {}
-    };
+template <class F>
+struct overload<F> : public F
+{
+    explicit overload(F f) : F(f) {}
+};
 
-    template <class F, class... Fs>
-    struct overload<F, Fs...> : public overload<F>, overload<Fs...>
-    {
-        explicit overload(F f, Fs... fs) : overload<F>(f), overload<Fs...>(fs...) {}
+template <class F, class... Fs>
+struct overload<F, Fs...> : public overload<F>, overload<Fs...>
+{
+    explicit overload(F f, Fs... fs) : overload<F>(f), overload<Fs...>(fs...) {}
 
-        using overload<F>::operator();
-        using overload<Fs...>::operator();
-    };
-}  // namespace detail
+    using overload<F>::    operator();
+    using overload<Fs...>::operator();
+};
+} // namespace detail
 
 template <class... F>
 auto overloaded(F... f)
@@ -56,16 +56,17 @@ namespace telegram
 
 class manager
 {
-public:
+    public:
     explicit manager();
     ~manager();
 
     void run();
 
-    signal(message_received, std::string, std::string);
+    make_signal(message_received, std::string, std::string);
 
-private:
-    void send_query(td_api::object_ptr<td_api::Function> function, std::function<void(td_api::object_ptr<td_api::Object>)> handler = nullptr);
+    private:
+    void send_query(td_api::object_ptr<td_api::Function>                    function,
+                    std::function<void(td_api::object_ptr<td_api::Object>)> handler = nullptr);
 
     bool handle_response(td::Client::Response response);
 
@@ -77,20 +78,20 @@ private:
 
     bool is_authorized = false;
     bool needs_restart = false;
+    bool should_run    = true;
 
     std::map<std::uint64_t, std::function<void(td_api::object_ptr<td_api::Object>)>> handlers;
     std::uint64_t current_query_id = 1;
 
-    std::map<std::int32_t, std::string> chat_titles;
+    std::map<std::int32_t, std::string>                      chat_titles;
     std::map<std::int32_t, td_api::object_ptr<td_api::user>> users;
 
-    std::string first_name = "Thomas";
-    std::string last_name = "Dooms";
-    std::string phone_number = "+32478523443";
+    std::string first_name     = "Thomas";
+    std::string last_name      = "Dooms";
+    std::string phone_number   = "+32478523443";
     std::string encryption_key = "t";
 
     std::thread thread;
-    bool should_run = true;
 };
 
-}
+} // namespace telegram
