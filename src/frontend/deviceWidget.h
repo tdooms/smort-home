@@ -40,20 +40,23 @@ class DeviceWidget : public QWidget
         blue->setRange(0, 255);
         blue->setTracking(false);
 
-        device->when_connected([&]() { button->setEnabled(true); });
-        device->when_disconnected([&]() { button->setEnabled(false); });
+        const auto update_callback = [this](yeelight::Parameter parameter, yeelight::Value value)
+        {
+            if(parameter == yeelight::Parameter::connected)
+            {
+                button->setEnabled(value);
+            }
+            else if(parameter == yeelight::Parameter::powered)
+            {
+                std::cout << "powered changed\n";
+            }
+            else if(parameter == yeelight::Parameter::brightness)
+            {
+                std::cout << "brightness changed\n";
+            }
+        };
 
-
-        device->when_updated([&]() {
-            button->setText(QString::fromStdString(device->get_name().first));
-
-            brightness->setEnabled(true);
-            red->setEnabled(true);
-            green->setEnabled(true);
-            blue->setEnabled(true);
-
-            brightness->setValue(device->get_brightness().first);
-        });
+        device->set_update_callback(update_callback);
 
         layout->addWidget(button);
         layout->addWidget(brightness);

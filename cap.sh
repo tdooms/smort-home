@@ -1,0 +1,1 @@
+sudo setcap cap_net_raw=eip CLionProjects/smort-home/cmake-build-debug/SHP

@@ -9,10 +9,14 @@
 
 #include "device.h"
 
+#include <boost-icmp/icmp_header.hpp>
+#include <boost-icmp/ipv4_header.hpp>
+
 #include <algorithm>
 #include <iostream>
 #include <thread>
 
+#include <boost-icmp/icmp_header.hpp>
 #include <nlohmann/json.h>
 
 namespace
@@ -31,61 +35,29 @@ using namespace std::chrono_literals;
 
 Device::Device(const std::shared_ptr<boost::asio::io_context>& context,
                boost::asio::ip::tcp::endpoint                  endpoint)
-: context(context), endpoint(std::move(endpoint)), send_socket(*context), buffer(1024, '\0'),
-  state(State::stateless), message_id(1)
+: context(context), tcp_endpoint(std::move(endpoint)), tcp_socket(*context),
+  icmp_endpoint(boost::asio::ip::make_address("10.1.1.10"), 1),
+  icmp_socket(*context, boost::asio::ip::icmp::v4()), buffer(1024, '\0'),
+  state(State::disconnected), pending_requests(), message_id(1), ping_id(1),
+  update_callback(nullptr), error_callback(nullptr), operation_timer(*context),
+  ping_timer(*context)
 {
+    // TODO: something something capabilities
+    // for some reason the ICMP socket has to connect...
+    // icmp_socket.connect(icmp_endpoint);
+
     // try to establish a connection
     try_connecting();
 }
 
-void Device::when_connected(std::function<void()> operation, bool remove)
+void Device::set_update_callback(std::function<void(Parameter, Value)> callback)
 {
-    if(state != State::connected)
-    {
-        on_connection.emplace_back(std::move(operation), remove);
-    }
-    else
-    {
-        operation();
-    }
+    update_callback = std::move(callback);
 }
 
-void Device::when_disconnected(std::function<void()> operation, bool remove)
+void Device::set_error_callback(std::function<void(Error)> callback)
 {
-    if(state != State::disconnected)
-    {
-        on_disconnection.emplace_back(std::move(operation), remove);
-    }
-    else
-    {
-        operation();
-    }
-}
-
-void Device::when_updated(std::function<void()> operation, bool remove)
-{
-    on_update.emplace_back(std::move(operation), remove);
-}
-
-std::pair<bool, bool> Device::get_powered()
-{
-    const auto temp = powered;
-    powered.second  = false;
-    return temp;
-}
-
-std::pair<int32_t, bool> Device::get_brightness()
-{
-    const auto temp = brightness;
-    powered.second  = false;
-    return temp;
-}
-
-std::pair<std::string, bool> Device::get_name()
-{
-    const auto temp = name;
-    powered.second  = false;
-    return temp;
+    error_callback = std::move(callback);
 }
 
 
@@ -94,24 +66,26 @@ void Device::toggle()
     send_operation("toggle");
 }
 
-void Device::set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration)
+void Device::set_color_temperature(size_t temp, std::chrono::milliseconds duration)
 {
-    send_operation("set_ct_abx", new_temperature, string_powered(duration), duration.count());
+    send_operation("set_ct_abx", temp, string_powered(duration), duration.count());
 }
 
-void Device::set_rgb_color(dot::color new_color, std::chrono::milliseconds duration)
+void Device::set_rgb_color(dot::color color, std::chrono::milliseconds duration)
 {
-    send_operation("set_rgb", dot::color::to_rgb(new_color), string_powered(duration), duration.count());
+    send_operation("set_rgb", dot::color::to_rgb(color),
+                   string_powered(duration), duration.count());
 }
 
-void Device::set_brightness(size_t new_brightness, std::chrono::milliseconds duration)
+void Device::set_brightness(size_t brightness, std::chrono::milliseconds duration)
 {
-    send_operation("set_bright", new_brightness, string_powered(duration), duration.count());
+    send_operation("set_bright", brightness, string_powered(duration), duration.count());
 }
 
 void Device::set_powered(bool on, std::chrono::milliseconds duration)
 {
-    send_operation("set_power", on ? "on" : "off", string_powered(duration), duration.count());
+    send_operation("set_power", on ? "on" : "off", string_powered(duration),
+                   duration.count());
 }
 
 void Device::start_color_flow(flow_stop_action action, const std::vector<flow_state>& states)
@@ -122,7 +96,8 @@ void Device::start_color_flow(flow_stop_action action, const std::vector<flow_st
         stream << state.duration.count() << ',';
         stream << static_cast<size_t>(state.mode) << ',';
 
-        if(state.mode == color_mode::temperature) stream << state.temperature << ',';
+        if(state.mode == color_mode::temperature)
+            stream << state.temperature << ',';
         else if(state.mode == color_mode::rgb)
             stream << dot::color::to_rgb(state.color) << ',';
         else if(state.mode == color_mode::sleep)
@@ -133,7 +108,8 @@ void Device::start_color_flow(flow_stop_action action, const std::vector<flow_st
         stream << state.brightness;
     }
 
-    send_operation("start_cf", states.size(), static_cast<size_t>(action), stream.str());
+    send_operation("start_cf", states.size(), static_cast<size_t>(action),
+                   stream.str());
 }
 
 void Device::stop_color_flow()
@@ -151,135 +127,242 @@ void Device::remove_shutdown_timer()
     send_operation("cron_del", 0);
 }
 
-void Device::set_name(std::string new_name)
+void Device::set_name(std::string name)
 {
-    send_operation("set_name", new_name);
+    send_operation("set_name", std::move(name));
 }
 
 template <typename... Args>
-uint64_t Device::send_operation(std::string method, Args... args)
+void Device::send_operation(std::string method, Args... args)
 {
-    const auto id            = message_id;
-    const auto internal_send = [&, id]() {
+    const auto current_id      = message_id;
+    const auto timeout_handler = [this, current_id](auto error) {
+        if(not handle_wait_error(error, "send timeout")) return;
+
+        if(pending_requests.find(current_id) != pending_requests.end())
+        {
+            // this means no response was found after x seconds,
+            // so we assume the lamp was disconnected of for some reason
+            state = State::disconnected;
+            update_callback(Parameter::connected, 0);
+            try_connecting();
+        }
+    };
+
+    const auto send_handler
+    = [this](auto error, auto) { handle_tcp_error(error, "send request"); };
+
+    // if connected send the request
+    if(state == State::connected)
+    {
         auto json      = nlohmann::json();
-        json["id"]     = id;
+        json["id"]     = message_id++;
         json["method"] = std::move(method);
         (json["params"].emplace_back(std::move(args)), ...);
 
-        const auto handler = [&, id](const auto& error, [[maybe_unused]] auto bytes) {
-            if(error) return;
-            boost::asio::deadline_timer timer(*context, boost::posix_time::seconds(3));
-            const auto                  after = [&]([[maybe_unused]] const auto& error) {
-                if(error) return;
-                if(state != State::disconnected) disconnect_handler();
-            };
-            timer.async_wait(after);
-            timeouts.emplace(id, std::move(timer));
-        };
-        send_socket.async_send(boost::asio::buffer(json.dump() + "\r\n"), handler);
-    };
+        tcp_socket.async_send(boost::asio::buffer(json.dump() + "\r\n"), send_handler);
 
-    when_connected(internal_send);
-    return message_id++;
-}
-
-void Device::update_params()
-{
-    const auto id = send_operation("get_prop", "power", "bright", "name");
-    param_request.emplace(id);
+        operation_timer.expires_from_now(boost::posix_time::milliseconds(operation_timeout));
+        operation_timer.async_wait(timeout_handler);
+    }
+    else
+    {
+        error_callback(Error::not_connected);
+    }
 }
 
 
 void Device::start_listening()
 {
-    const auto recursive = [&](const auto& error, auto bytes) {
-        if(error) return;
+    start_tcp_listening();
+    start_icmp_listening();
+}
+
+void Device::start_tcp_listening()
+{
+    const auto tcp_receive = [this](const auto& error, auto bytes) {
+        // TODO; repair state
+        if(not handle_tcp_error(error, "tcp receive")) return;
 
         const auto json = nlohmann::json::parse(buffer.substr(0, bytes));
-        std::cout << json << '\n';
 
         if(json.contains("id"))
         {
             const uint64_t id = json["id"];
-            timeouts.at(id).cancel();
-            timeouts.erase(id);
-
-            const auto check_assign = [](auto& var, const auto& elem) {
-                if(elem != var.first) var = std::make_pair(elem, true);
-            };
-
-            if(param_request.find(id) != param_request.end())
-            {
-                check_assign(powered, json["result"][0] == "on");
-                check_assign(brightness, std::stoi(std::string(json["result"][1])));
-                check_assign(name, json["result"][2]);
-
-                execute_callbacks(on_update);
-            }
+            pending_requests.erase(id);
+        }
+        else
+        {
+            std::cout << json << '\n';
         }
 
+        reset_ping_timer();
         start_listening();
     };
 
-    // start the receive loop, settings a new
-    send_socket.async_receive(boost::asio::buffer(buffer), recursive);
+    // start the receive loop
+    tcp_socket.async_receive(boost::asio::buffer(buffer), tcp_receive);
+}
+
+void Device::start_icmp_listening()
+{
+    const auto ping_receive = [this](auto error, auto) {
+        // TODO: maybe also check want went wrong and such
+        if(not handle_icmp_error(error, "icmp receive")) return;
+
+        icmp_header icmp_header;
+        ipv4_header ipv4_header;
+        std::string body;
+
+        // this is awful, this will print data from the previous
+        // request because the buffer is initialized with zeroes
+        // TODO: something something bytes received smart stuff
+        std::istringstream(buffer) >> ipv4_header >> icmp_header >> body;
+        std::cout << "received ping: " << body << '\n';
+        if(icmp_header.identifier() == 93 and icmp_header.sequence_number() == ping_id)
+        {
+            ping_id++;
+        }
+
+        start_icmp_listening();
+    };
+
+    // start the receive loop
+    icmp_socket.async_receive(boost::asio::buffer(buffer), ping_receive);
 }
 
 void Device::try_connecting()
 {
-    const auto handler = [&](const auto& error) {
-        if(not error or error == boost::asio::error::already_connected)
+    if(state == State::connected)
+    {
+        throw std::logic_error("already connected");
+    }
+
+    const auto handler = [this](auto error) {
+        if(error == boost::asio::error::connection_aborted
+           or error == boost::asio::error::host_unreachable)
         {
-            connect_handler();
-        }
-        else if(error == boost::asio::error::connection_aborted or error == boost::asio::error::host_unreachable
-                or error == boost::asio::error::connection_refused)
-        {
+            state = State::disconnected;
+            update_callback(Parameter::connected, 0);
             try_connecting();
         }
-        else
-            std::cout << error << '\n';
+        else if(error == boost::asio::error::connection_refused)
+        {
+            std::cout << "TODO: handle connection refused\n";
+            state = State::disconnected;
+            update_callback(Parameter::connected, 0);
+            try_connecting();
+        }
+        else if(handle_tcp_error(error, "connecting tcp"))
+        {
+            state = State::connected;
+            update_callback(Parameter::connected, 1);
+            reset_ping_timer();
+        }
     };
 
     boost::system::error_code            error;
     boost::asio::socket_base::keep_alive option(true);
 
-    send_socket.open(endpoint.protocol(), error);
-    send_socket.set_option(option);
+    tcp_socket.open(tcp_endpoint.protocol(), error);
+    tcp_socket.set_option(option);
 
-    send_socket.async_connect(endpoint, handler);
+    tcp_socket.async_connect(tcp_endpoint, handler);
 }
 
-void Device::connect_handler()
+void Device::reset_ping_timer()
 {
-    state = State::connected;
-    start_listening(); // start the receiving loop
-    update_params();   // update internal values representing the state of the lamp
+    const std::function<void(boost::system::error_code)> timeout_handler = [this](auto error) {
+        if(not handle_wait_error(error, "ping timeout")) return;
+        // this means disconnect usually
 
-    execute_callbacks(on_connection);
+        send_ping();
+        reset_ping_timer();
+    };
+
+    ping_timer.cancel();
+    ping_timer.expires_from_now(boost::posix_time::milliseconds(ping_timeout));
+    ping_timer.async_wait(timeout_handler);
 }
 
-void Device::disconnect_handler()
+void Device::send_ping()
 {
-    state = State::disconnected;
-    execute_callbacks(on_disconnection);
+    // TODO: do bigbrain stuff without having to reconstructing the string every time
+    std::string body("Silky");
 
-    // deconstruct the previous socket gracefully and try wit a new one
-    send_socket = boost::asio::ip::tcp::socket(*context);
+    // Create an ICMP header for an echo request.
+    icmp_header echo_request;
+    echo_request.type(icmp_header::echo_request);
+    echo_request.code(0); // must be 0
+    echo_request.identifier(93);
+    echo_request.sequence_number(ping_id);
+    compute_checksum(echo_request, body.begin(), body.end());
 
-    try_connecting();
+    // Encode the request packet.
+    boost::asio::streambuf request_buffer;
+    std::ostream           os(&request_buffer);
+    os << echo_request << body;
+
+    const auto send_handler = [this](auto error, auto) {
+        handle_icmp_error(error, "send ping");
+        std::cout << "sending ping\n";
+    };
+
+    // Send the request.
+    icmp_socket.async_send_to(request_buffer.data(), icmp_endpoint, send_handler);
 }
 
-void Device::execute_callbacks(CallbackList& callbacks)
+bool Device::handle_tcp_error(boost::system::error_code error, std::string info)
 {
-    for(const auto& [func, remove] : callbacks)
+    if(error == boost::asio::error::connection_reset or error == boost::asio::error::eof)
     {
-        func();
-    }
+        std::cout << "tcp error: " << error << ". trying to reconnect\n";
 
-    const auto iter
-    = std::remove_if(callbacks.begin(), callbacks.end(), [](const auto& elem) { return elem.second; });
-    callbacks.erase(iter, callbacks.end());
+        state = State::disconnected;
+        update_callback(Parameter::connected, 0);
+
+        try_connecting();
+        return false;
+    }
+    else if(error)
+    {
+        throw std::runtime_error("tcp error: " + std::to_string(error.value())
+                                 + " " + std::move(info));
+    }
+    else
+    {
+        return true;
+    }
+}
+
+bool Device::handle_icmp_error(boost::system::error_code error, std::string info)
+{
+    if(error)
+    {
+        throw std::runtime_error("icmp error: " + std::to_string(error.value())
+                                 + " " + std::move(info));
+    }
+    else
+    {
+        return true;
+    }
+}
+
+bool Device::handle_wait_error(boost::system::error_code error, std::string info)
+{
+    if(error == boost::asio::error::operation_aborted)
+    {
+        return true;
+    }
+    else if(error)
+    {
+        throw std::runtime_error("wait error: " + std::to_string(error.value())
+                                 + " " + std::move(info));
+    }
+    else
+    {
+        return true;
+    }
 }
 
 

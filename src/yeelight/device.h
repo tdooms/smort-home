@@ -28,17 +28,33 @@
 namespace yeelight
 {
 
-enum State
+enum class State
 {
-    stateless,
     connected,
     disconnected,
 };
 
+enum class Parameter
+{
+    connected,
+    powered,
+    brightness,
+    color,
+};
+
+enum class Error
+{
+    none,
+    not_connected
+};
+
+using Value = uint32_t;
+
 class Device
 {
     public:
-    Device(const std::shared_ptr<boost::asio::io_context>& context, boost::asio::ip::tcp::endpoint endpoint);
+    Device(const std::shared_ptr<boost::asio::io_context>& context,
+           boost::asio::ip::tcp::endpoint                  endpoint);
 
     Device(const Device&) = delete;
 
@@ -46,29 +62,19 @@ class Device
 
     ////////////////////////////////////////////////////
 
-    void when_connected(std::function<void()> operation, bool remove = false);
+    void set_update_callback(std::function<void(Parameter, Value)> callback);
 
-    void when_disconnected(std::function<void()> operation, bool remove = false);
-
-    void when_updated(std::function<void()> operation, bool remove = false);
-
-    ////////////////////////////////////////////////////
-
-    std::pair<bool, bool> get_powered();
-
-    std::pair<int32_t, bool> get_brightness();
-
-    std::pair<std::string, bool> get_name();
+    void set_error_callback(std::function<void(Error)> callback);
 
     ////////////////////////////////////////////////////
 
     void toggle();
 
-    void set_color_temperature(size_t new_temperature, std::chrono::milliseconds duration = default_duration);
+    void set_color_temperature(size_t temp, std::chrono::milliseconds duration = default_duration);
 
-    void set_rgb_color(dot::color new_color, std::chrono::milliseconds duration = default_duration);
+    void set_rgb_color(dot::color color, std::chrono::milliseconds duration = default_duration);
 
-    void set_brightness(size_t new_brightness, std::chrono::milliseconds duration = default_duration);
+    void set_brightness(size_t brightness, std::chrono::milliseconds duration = default_duration);
 
     void set_powered(bool on, std::chrono::milliseconds duration = default_duration);
 
@@ -80,50 +86,64 @@ class Device
 
     void remove_shutdown_timer();
 
-    void set_name(std::string new_name);
+    void set_name(std::string name);
 
     private:
-
-    using CallbackList = std::vector<std::pair<std::function<void()>, bool>>;
-
-
+    // this function assures the operation is sent, even across tcp connections
     template <typename... Args>
-    uint64_t send_operation(std::string method, Args... args);
-
-    void update_params();
+    void send_operation(std::string method, Args... args);
 
     void start_listening();
 
+    void start_tcp_listening();
+
+    void start_icmp_listening();
+
     void try_connecting();
 
-    void connect_handler();
+    void reset_ping_timer();
 
-    void disconnect_handler();
+    void send_ping();
 
-    void execute_callbacks(CallbackList& callbacks);
+    bool handle_tcp_error(boost::system::error_code error, std::string info);
+
+    bool handle_icmp_error(boost::system::error_code error, std::string info);
+
+    bool handle_wait_error(boost::system::error_code error, std::string info);
 
     // io stuff
-    std::shared_ptr<boost::asio::io_context>        context;
-    boost::asio::ip::tcp::endpoint                  endpoint;
-    boost::asio::ip::tcp::socket                    send_socket;
-    std::string                                     buffer;
-    State                                           state;
-    uint64_t                                        message_id;
-    std::set<uint64_t>                              param_request;
-    std::map<uint64_t, boost::asio::deadline_timer> timeouts;
+    std::shared_ptr<boost::asio::io_context> context;
 
-    // contained data, bool indicates if it has been updates since query
-    std::pair<bool, bool>        powered;
-    std::pair<int32_t, bool>     brightness;
-    std::pair<std::string, bool> name;
+    boost::asio::ip::tcp::endpoint tcp_endpoint;
+    boost::asio::ip::tcp::socket   tcp_socket;
 
-    // handler functions
-    CallbackList on_connection;
-    CallbackList on_disconnection;
-    CallbackList on_update;
+    boost::asio::ip::icmp::endpoint icmp_endpoint;
+    boost::asio::ip::icmp::socket   icmp_socket;
+
+    // various
+    std::string buffer;
+    State       state;
+
+    // various
+    std::set<uint64_t> pending_requests;
+    uint64_t           message_id;
+    uint64_t           ping_id;
+
+    // callback functions
+    std::function<void(Parameter, Value)> update_callback;
+    std::function<void(Error)>            error_callback;
+
+    // variables for disconnect checking
+    const uint32_t ping_timeout      = 3000;
+    const uint32_t operation_timeout = 1000;
+
+    boost::asio::deadline_timer operation_timer;
+    boost::asio::deadline_timer ping_timer;
 
     // static variables
     constexpr static auto default_duration = std::chrono::milliseconds(300);
+    //    inline const static std::map<std::string, Parameter> parameter_map
+    //    = { { "powered", powered }, { "power", on }, { "bright", brightness } };
 };
 
 } // namespace yeelight
